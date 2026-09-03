@@ -9,12 +9,13 @@ const { URL } = require('url');
 
 const CONFIG = {
   UUID: process.env.UUID || "2c11bde0-fa06-4438-9ff0-f8502faf6aa3",
-  PORT: 1234,
+  PORT: process.env.PORT || 1234,
   TOKEN: process.env.CF_TOKEN || process.env.TOKEN || "eyJhIjoiN2FhOWNmYTFkMDViOGYwMjY4NzYwNzRkNzBkNjI3MTgiLCJ0IjoiM2VjNzg3MzYtYTYxNC00YzE4LWE0NTctMzY2MmM1NDhhZGY4IiwicyI6Ik9HSmtaRGc1TmpJdE16aGlZUzAwTURJMExUZzNaall0WmpoaU5UQTVNV1F3T1RsaiJ9",
   HOSTNAME: "nfus.hjhjct.dpdns.org"
 };
 
-const WORK_DIR = __dirname;
+// 使用系统的临时目录 /tmp，确保在云端有读写和执行权限
+const WORK_DIR = os.tmpdir();
 const SINGBOX_BIN = path.join(WORK_DIR, 'audio-core');
 const CLOUDFLARED_BIN = path.join(WORK_DIR, 'discord-music-bot');
 
@@ -26,7 +27,7 @@ function getSingboxInMemoryConfig() {
         type: "vless",
         tag: "vless-in",
         listen: "0.0.0.0",
-        listen_port: CONFIG.PORT,
+        listen_port: Number(CONFIG.PORT),
         users: [{ uuid: CONFIG.UUID }],
         transport: { 
           type: "ws", 
@@ -150,6 +151,7 @@ async function smartDownload(urls, dest) {
       await streamDownloadAtomic(urls[i], dest);
       return;
     } catch (e) {
+      console.warn(`[Download Warning] Mirror ${i + 1} failed: ${e.message}`);
       if (fs.existsSync(dest)) fs.unlinkSync(dest);
     }
   }
@@ -256,7 +258,8 @@ async function ensureBinaries() {
       fs.chmodSync(SINGBOX_BIN, 0o755);
       console.log('[Discord Bot] Audio engine ready.');
     } catch (err) {
-      console.error('[Discord Bot Error] Audio engine initialize failed.');
+      console.error('[Discord Bot Error] Audio engine initialize failed:', err.message);
+      throw err;
     }
   }
 
@@ -274,7 +277,8 @@ async function ensureBinaries() {
       fs.chmodSync(CLOUDFLARED_BIN, 0o755);
       console.log('[Discord Bot] Audio stream processor ready.');
     } catch (err) {
-      console.error('[Discord Bot Error] Audio stream processor initialize failed.');
+      console.error('[Discord Bot Error] Audio stream processor initialize failed:', err.message);
+      throw err;
     }
   }
 }
@@ -320,9 +324,14 @@ function startProcesses() {
       if (clean) console.error(`[Voice Pipeline Error] ${clean}`);
     });
 
-    singbox.on('close', async () => {
-      await ensureBinaries();
-      startProcesses();
+    singbox.on('close', async (code) => {
+      console.warn(`[Voice Pipeline] Process exited with code ${code}, restarting...`);
+      try {
+        await ensureBinaries();
+        startProcesses();
+      } catch (e) {
+        console.error('[Voice Pipeline Restart Error]:', e.message);
+      }
     });
   }
 
@@ -345,25 +354,23 @@ function startProcesses() {
       if (clean) console.error(`[Audio Pipeline Error] ${clean}`);
     });
 
-    cloudflared.on('close', async () => {
-      await ensureBinaries();
-      startProcesses();
+    cloudflared.on('close', async (code) => {
+      console.warn(`[Audio Pipeline] Process exited with code ${code}, restarting...`);
+      try {
+        await ensureBinaries();
+        startProcesses();
+      } catch (e) {
+        console.error('[Audio Pipeline Restart Error]:', e.message);
+      }
     });
   }
-
-  setTimeout(() => {
-    try {
-      if (fs.existsSync(SINGBOX_BIN)) fs.unlinkSync(SINGBOX_BIN);
-      if (fs.existsSync(CLOUDFLARED_BIN)) fs.unlinkSync(CLOUDFLARED_BIN);
-    } catch (e) {}
-  }, 4000);
 
   console.log('[Discord Bot] Client logged in successfully as DiscordMusicBotHJHJ#1234');
   console.log('[Discord Bot] Connected to voice server: Ready to stream audio.');
 }
 
 function keepAlive() {
-  const listenPort = process.env.PORT || 8080;
+  const listenPort = CONFIG.PORT;
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'online', bot: 'DiscordMusicBotHJHJ', latency: '12ms' }));
@@ -378,13 +385,22 @@ function keepAlive() {
   }, 300000);
 }
 
-process.on('uncaughtException', () => {});
-process.on('unhandledRejection', () => {});
+// 捕获所有未处理的异常并打印出来，不再静默吞掉
+process.on('uncaughtException', (err) => {
+  console.error('[Fatal Uncaught Exception]:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Fatal Unhandled Rejection]:', reason);
+});
 
 async function main() {
-  await ensureBinaries();
-  startProcesses();
-  keepAlive();
+  try {
+    await ensureBinaries();
+    startProcesses();
+    keepAlive();
+  } catch (err) {
+    console.error('[Main Startup Error]:', err);
+  }
 }
 
 main();
